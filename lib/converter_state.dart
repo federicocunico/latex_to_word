@@ -28,6 +28,7 @@ class ConverterState extends ChangeNotifier {
   String _errorMessage = '';
   File? _resultDocx;
   bool _isDragOver = false;
+  String? _selectedCslStyle;
 
   AppStatus get status => _status;
   String get statusMessage => _statusMessage;
@@ -35,6 +36,7 @@ class ConverterState extends ChangeNotifier {
   String get errorMessage => _errorMessage;
   File? get resultDocx => _resultDocx;
   bool get isDragOver => _isDragOver;
+  String? get selectedCslStyle => _selectedCslStyle;
 
   bool get isProcessing =>
       _status == AppStatus.extracting || _status == AppStatus.converting;
@@ -89,6 +91,12 @@ class ConverterState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setCslStyle(String? style) {
+    if (_selectedCslStyle == style) return;
+    _selectedCslStyle = style;
+    notifyListeners();
+  }
+
   Future<void> startConversion(File zipFile) async {
     if (isProcessing) return;
 
@@ -102,6 +110,7 @@ class ConverterState extends ChangeNotifier {
     try {
       final output = await ConversionPipeline.run(
         zipFile,
+        cslOverride: _selectedCslStyle,
         onProgress: (progress) {
           switch (progress.step) {
             case PipelineStep.extract:

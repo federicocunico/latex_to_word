@@ -19,10 +19,14 @@ class PandocConverter {
   /// Returns [ConversionResult] with the output file and pandoc log.
   /// Throws [ProcessException] if pandoc exits with a non-zero code AND
   /// no DOCX file was produced.
+  ///
+  /// [cslPath] — optional path to a CSL file; when provided pandoc uses that
+  /// citation style instead of its built-in default.
   static Future<ConversionResult> convert(
     File mainTex,
-    Directory outputDir,
-  ) async {
+    Directory outputDir, {
+    String? cslPath,
+  }) async {
     await outputDir.create(recursive: true);
 
     final pandocBin = PandocResolver.resolve();
@@ -46,6 +50,7 @@ class PandocConverter {
       '--resource-path=$resourcePathStr',
       '--standalone',
       '--citeproc',
+      if (cslPath != null) '--csl=$cslPath',
       ...bibArgs,
     ];
 

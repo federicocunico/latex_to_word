@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'citation_style_resolver.dart';
 import 'extractor.dart';
 import 'converter.dart';
 
@@ -35,6 +36,7 @@ class ConversionPipeline {
   static Future<PipelineOutput> run(
     File zipFile, {
     void Function(PipelineProgress)? onProgress,
+    String? cslOverride,
   }) async {
     final tempBase = await getTemporaryDirectory();
     final jobId = DateTime.now().millisecondsSinceEpoch.toRadixString(16);
@@ -49,10 +51,17 @@ class ConversionPipeline {
       progress(PipelineStep.extract, 'Extracting ZIP archive…');
       final extracted = await ZipExtractor.extract(zipFile, workDir);
 
+      progress(PipelineStep.convert, 'Resolving citation style…');
+      final cslPath = await CitationStyleResolver.resolveWithOverride(
+        extracted.mainTex,
+        cslOverride,
+      );
+
       progress(PipelineStep.convert, 'Converting LaTeX → DOCX with pandoc…');
       final converted = await PandocConverter.convert(
         extracted.mainTex,
         outDir,
+        cslPath: cslPath,
       );
 
       progress(PipelineStep.done, 'Conversion complete.');

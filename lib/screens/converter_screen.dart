@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../converter_state.dart';
+import '../services/citation_style_resolver.dart';
 import '../widgets/drop_zone.dart';
 
 class ConverterScreen extends StatelessWidget {
@@ -94,6 +95,8 @@ class _IdleView extends StatelessWidget {
               ),
           textAlign: TextAlign.center,
         ),
+        const SizedBox(height: 24),
+        const _CslStylePicker(),
         const SizedBox(height: 32),
         FilledButton.icon(
           icon: const Icon(Icons.folder_open_rounded),
@@ -292,6 +295,115 @@ class _ErrorView extends StatelessWidget {
           onPressed: state.reset,
         ),
       ],
+    );
+  }
+}
+
+// ── Citation Style Picker ─────────────────────────────────────────────────────
+
+class _CslStylePicker extends StatelessWidget {
+  const _CslStylePicker();
+
+  static const ({String csl, String label}) _autoOption = (
+    csl: '',
+    label: 'Auto (detect from LaTeX)',
+  );
+
+  static List<({String csl, String label})> get _options => [
+        _autoOption,
+        ...CitationStyleResolver.supportedStyles
+            .map((s) => (csl: s.$1, label: s.$2)),
+      ];
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<ConverterState>();
+    final currentCsl = state.selectedCslStyle;
+    final currentLabel = currentCsl == null
+        ? ''
+        : CitationStyleResolver.supportedStyles
+            .firstWhere(
+              (s) => s.$1 == currentCsl,
+              orElse: () => (currentCsl, currentCsl),
+            )
+            .$2;
+
+    return Autocomplete<({String csl, String label})>(
+      key: ValueKey(currentCsl),
+      initialValue: TextEditingValue(text: currentLabel),
+      displayStringForOption: (o) => o.label,
+      optionsBuilder: (textEditingValue) {
+        final all = _options;
+        final q = textEditingValue.text.toLowerCase();
+        if (q.isEmpty) return all;
+        // If text exactly matches an option label the user re-focused after
+        // selecting — show all so they can change it.
+        if (all.any((o) => o.label.toLowerCase() == q)) return all;
+        return all.where(
+          (o) =>
+              o.label.toLowerCase().contains(q) ||
+              o.csl.toLowerCase().contains(q),
+        );
+      },
+      onSelected: (option) {
+        context
+            .read<ConverterState>()
+            .setCslStyle(option.csl.isEmpty ? null : option.csl);
+      },
+      fieldViewBuilder: (context, controller, focusNode, onSubmitted) {
+        return TextField(
+          controller: controller,
+          focusNode: focusNode,
+          onSubmitted: (_) => onSubmitted(),
+          decoration: InputDecoration(
+            labelText: 'Citation Style',
+            hintText: 'Auto (detect from LaTeX)',
+            border: const OutlineInputBorder(),
+            isDense: true,
+            suffixIcon: currentCsl != null
+                ? IconButton(
+                    iconSize: 18,
+                    icon: const Icon(Icons.clear),
+                    tooltip: 'Reset to Auto',
+                    onPressed: () =>
+                        context.read<ConverterState>().setCslStyle(null),
+                  )
+                : const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Icon(Icons.search, size: 18),
+                  ),
+          ),
+        );
+      },
+      optionsViewBuilder: (context, onSelected, options) => Align(
+        alignment: Alignment.topLeft,
+        child: Material(
+          elevation: 4,
+          borderRadius: BorderRadius.circular(8),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480, maxHeight: 300),
+            child: ListView.builder(
+              padding: EdgeInsets.zero,
+              shrinkWrap: true,
+              itemCount: options.length,
+              itemBuilder: (context, index) {
+                final option = options.elementAt(index);
+                return ListTile(
+                  dense: true,
+                  title: Text(option.label),
+                  subtitle: option.csl.isEmpty
+                      ? null
+                      : Text(
+                          option.csl,
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                  onTap: () => onSelected(option),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
