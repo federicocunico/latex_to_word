@@ -1,0 +1,171 @@
+name: Build and Release
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  metadata:
+    name: Resolve Version Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.version.outputs.app_version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      release_name: ${{ steps.version.outputs.release_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute version and unique tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(grep '^version:' pubspec.yaml | awk '{print $2}')"
+          if [ -z "${APP_VERSION}" ]; then
+            echo "Could not determine app version from pubspec.yaml" >&2
+            exit 1
+          fi
+
+          VERSION_TAG="${APP_VERSION//+/-}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          RELEASE_TAG="v${VERSION_TAG}-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}-${SHORT_SHA}"
+          RELEASE_NAME="latex_to_word ${APP_VERSION} (build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT})"
+
+          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_name=${RELEASE_NAME}" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Run tests
+        run: flutter test
+
+  build:
+    name: Build (${{ matrix.platform.name }})
+    needs:
+      - metadata
+      - test
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: windows
+            os: windows-latest
+            build_command: flutter build windows --release
+            artifact_name: windows-x64
+            artifact_file: latex_to_word_windows_x64.zip
+          - name: macos
+            os: macos-latest
+            build_command: flutter build macos --release
+            artifact_name: macos
+            artifact_file: latex_to_word_macos.zip
+          - name: linux
+            os: ubuntu-latest
+            build_command: flutter build linux --release
+            artifact_name: linux-x64
+            artifact_file: latex_to_word_linux_x64.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build desktop app
+        run: ${{ matrix.platform.build_command }}
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath "${{ matrix.platform.artifact_file }}" -Force
+
+      - name: Package macOS artifact
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ditto -c -k --sequesterRsrc --keepParent build/macos/Build/Products/Release/latex_to_word_app.app "${{ matrix.platform.artifact_file }}"
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C build/linux/x64/release -czf "${{ matrix.platform.artifact_file }}" bundle
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.artifact_name }}
+          path: ${{ matrix.platform.artifact_file }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - metadata
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Add version to asset filenames
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_VERSION="${{ needs.metadata.outputs.app_version }}"
+          mv dist/windows-x64/latex_to_word_windows_x64.zip dist/windows-x64/latex_to_word_${APP_VERSION}_windows_x64.zip
+          mv dist/macos/latex_to_word_macos.zip dist/macos/latex_to_word_${APP_VERSION}_macos.zip
+          mv dist/linux-x64/latex_to_word_linux_x64.tar.gz dist/linux-x64/latex_to_word_${APP_VERSION}_linux_x64.tar.gz
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          name: ${{ needs.metadata.outputs.release_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            dist/**/*.zip
+            dist/**/*.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

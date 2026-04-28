@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'pandoc_resolver.dart';
+import 'pdf_image_preprocessor.dart';
 
 class ConversionResult {
   final File docxFile;
@@ -29,14 +30,14 @@ class PandocConverter {
   }) async {
     await outputDir.create(recursive: true);
 
+    final imagePrep = await PdfImagePreprocessor.prepareForDocx(mainTex);
+
     final pandocBin = PandocResolver.resolve();
     final docxPath = p.join(outputDir.path, 'output.docx');
     final sourceDir = mainTex.parent;
 
     final resourcePaths = await _collectResourcePaths(sourceDir);
-    final resourcePathStr = resourcePaths.join(
-      Platform.isWindows ? ';' : ':',
-    );
+    final resourcePathStr = resourcePaths.join(Platform.isWindows ? ';' : ':');
 
     final bibFiles = await _findBibFiles(sourceDir);
     final bibArgs = bibFiles.map((f) => '--bibliography=${f.path}').toList();
@@ -54,20 +55,29 @@ class PandocConverter {
       ...bibArgs,
     ];
 
-    final result = await Process.run(
-      cmd.first,
-      cmd.sublist(1),
-      workingDirectory: sourceDir.path,
-      runInShell: false,
-    ).timeout(
-      const Duration(seconds: 120),
-      onTimeout: () => throw TimeoutException(
-        'pandoc timed out after 120 seconds',
-        const Duration(seconds: 120),
-      ),
-    );
+    final result =
+        await Process.run(
+          cmd.first,
+          cmd.sublist(1),
+          workingDirectory: sourceDir.path,
+          runInShell: false,
+        ).timeout(
+          const Duration(seconds: 120),
+          onTimeout: () => throw TimeoutException(
+            'pandoc timed out after 120 seconds',
+            const Duration(seconds: 120),
+          ),
+        );
 
-    final log = '${result.stdout}${result.stderr}'.trim();
+    final pandocLog = '${result.stdout}${result.stderr}'.trim();
+    final logParts = <String>[];
+    if (imagePrep.log.isNotEmpty) {
+      logParts.add(imagePrep.log);
+    }
+    if (pandocLog.isNotEmpty) {
+      logParts.add(pandocLog);
+    }
+    final log = logParts.join('\n\n');
 
     final docxFile = File(docxPath);
     if (!docxFile.existsSync()) {
