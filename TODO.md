@@ -6,5 +6,5 @@ To find main file, look for one named main.tex.
 
 I want to be sure the process goes fine, so as check, include also latex compiler and compile zip to pdf, then convert the pandoc's docx to pdf and do a similarity check, importantly matching the layout not only the content, for instance, using a combined text+images similarity check (SSIM?). Ensure images are embedded fine and also all the content, produce a similarity score based on all pages individually and a global score.
 
-Create an UI for doing so in VUE3 (see frontend/ for blank project) and a backend to launch command line and check everything works in FASTAPI.
+Keep the converter UI and pipeline in Flutter desktop as the main implementation path.
 
