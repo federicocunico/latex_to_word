@@ -55,7 +55,7 @@ class PdfImagePreprocessor {
     final warnings = <String>[];
 
     for (final texFile in texFiles) {
-      final outcome = await _rewriteTexFile(texFile, effectiveConverter);
+      final outcome = await _rewriteTexFile(texFile, root, effectiveConverter);
       convertedImages += outcome.convertedImages;
       warnings.addAll(outcome.warnings);
       if (outcome.rewritten) {
@@ -82,6 +82,7 @@ class PdfImagePreprocessor {
 
   static Future<_RewriteOutcome> _rewriteTexFile(
     File texFile,
+    Directory projectRoot,
     PdfToPngConverter converter,
   ) async {
     final content = await texFile.readAsString();
@@ -108,9 +109,25 @@ class PdfImagePreprocessor {
 
       if (!_isCommentedOut(content, match.start)) {
         final rawRef = match.group(1)!;
-        final sourcePdf = _resolvePdfReference(texFile.parent, rawRef);
 
-        if (sourcePdf != null && await sourcePdf.exists()) {
+        // LaTeX resolves image paths from the project root (compile directory).
+        // Fall back to the tex file's own directory for paths that use relative
+        // navigation (e.g. ../images/fig.pdf written relative to the .tex file).
+        File? sourcePdf;
+        Directory resolveBase = projectRoot;
+
+        final fromRoot = _resolvePdfReference(projectRoot, rawRef);
+        if (fromRoot != null && await fromRoot.exists()) {
+          sourcePdf = fromRoot;
+        } else {
+          final fromTexDir = _resolvePdfReference(texFile.parent, rawRef);
+          if (fromTexDir != null && await fromTexDir.exists()) {
+            sourcePdf = fromTexDir;
+            resolveBase = texFile.parent;
+          }
+        }
+
+        if (sourcePdf != null) {
           final outputPng = File(
             p.join(
               sourcePdf.parent.path,
@@ -127,7 +144,7 @@ class PdfImagePreprocessor {
 
           if (converted && await outputPng.exists()) {
             final relativePngPath = p
-                .relative(outputPng.path, from: texFile.parent.path)
+                .relative(outputPng.path, from: resolveBase.path)
                 .replaceAll('\\', '/');
             replacementSnippet = originalSnippet.replaceFirst(
               rawRef,
