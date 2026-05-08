@@ -5,6 +5,8 @@ import 'package:path_provider/path_provider.dart';
 import 'citation_style_resolver.dart';
 import 'extractor.dart';
 import 'converter.dart';
+import 'pdf_image_preprocessor.dart';
+import 'pdf_tool_downloader.dart';
 
 enum PipelineStep { extract, convert, done, error }
 
@@ -57,6 +59,8 @@ class ConversionPipeline {
         cslOverride,
       );
 
+      await _ensurePdfTools(progress);
+
       progress(PipelineStep.convert, 'Converting LaTeX → DOCX with pandoc…');
       final converted = await PandocConverter.convert(
         extracted.mainTex,
@@ -74,6 +78,36 @@ class ConversionPipeline {
       if (await workDir.exists()) {
         await workDir.delete(recursive: true);
       }
+    }
+  }
+
+  /// Downloads poppler on Windows if no PDF rasterizer tools are available.
+  static Future<void> _ensurePdfTools(
+    void Function(PipelineStep, String) progress,
+  ) async {
+    if (PdfImagePreprocessor.hasToolsAvailable()) return;
+    if (!Platform.isWindows) return;
+    if (PdfToolDownloader.isAvailable()) {
+      PdfImagePreprocessor.configure(PdfToolDownloader.resolvedBinDir());
+      PdfImagePreprocessor.clearToolCache();
+      return;
+    }
+
+    progress(PipelineStep.convert, 'Downloading PDF image converter…');
+    try {
+      await PdfToolDownloader.download(
+        onStatus: (msg) => progress(PipelineStep.convert, msg),
+        onProgress: (frac) => progress(
+          PipelineStep.convert,
+          frac < 0
+              ? 'Downloading PDF tool…'
+              : 'Downloading PDF tool (${(frac * 100).toInt()}%)…',
+        ),
+      );
+      PdfImagePreprocessor.configure(PdfToolDownloader.resolvedBinDir());
+      PdfImagePreprocessor.clearToolCache();
+    } catch (_) {
+      // Non-fatal: PDF images will be skipped with a warning in the log.
     }
   }
 

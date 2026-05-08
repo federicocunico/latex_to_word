@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:path/path.dart' as p;
+import 'latex_preprocessor.dart';
 import 'pandoc_resolver.dart';
 import 'pdf_image_preprocessor.dart';
 
@@ -30,6 +31,7 @@ class PandocConverter {
   }) async {
     await outputDir.create(recursive: true);
 
+    final latexPrep = await LatexPreprocessor.preprocess(mainTex);
     final imagePrep = await PdfImagePreprocessor.prepareForDocx(mainTex);
 
     final pandocBin = PandocResolver.resolve();
@@ -42,6 +44,8 @@ class PandocConverter {
     final bibFiles = await _findBibFiles(sourceDir);
     final bibArgs = bibFiles.map((f) => '--bibliography=${f.path}').toList();
 
+    final referenceDoc = await _ensureReferenceDoc(pandocBin, outputDir);
+
     final cmd = [
       pandocBin,
       mainTex.path,
@@ -51,6 +55,7 @@ class PandocConverter {
       '--resource-path=$resourcePathStr',
       '--standalone',
       '--citeproc',
+      if (referenceDoc != null) '--reference-doc=${referenceDoc.path}',
       if (cslPath != null) '--csl=$cslPath',
       ...bibArgs,
     ];
@@ -71,6 +76,9 @@ class PandocConverter {
 
     final pandocLog = '${result.stdout}${result.stderr}'.trim();
     final logParts = <String>[];
+    if (latexPrep.log.isNotEmpty) {
+      logParts.add(latexPrep.log);
+    }
     if (imagePrep.log.isNotEmpty) {
       logParts.add(imagePrep.log);
     }
@@ -90,6 +98,36 @@ class PandocConverter {
     }
 
     return ConversionResult(docxFile: docxFile, log: log);
+  }
+
+  /// Generates (once) pandoc's default reference.docx into [outputDir] and
+  /// returns a [File] pointing to it.  Returns null on failure so the caller
+  /// can proceed without --reference-doc.
+  static Future<File?> _ensureReferenceDoc(
+    String pandocBin,
+    Directory outputDir,
+  ) async {
+    final refPath = p.join(outputDir.path, 'reference.docx');
+    final refFile = File(refPath);
+    if (refFile.existsSync()) return refFile;
+
+    try {
+      final result = await Process.run(
+        pandocBin,
+        ['--print-default-data-file', 'reference.docx'],
+        runInShell: false,
+      ).timeout(const Duration(seconds: 15));
+
+      if (result.exitCode == 0) {
+        final bytes = result.stdout;
+        if (bytes is List<int> && bytes.isNotEmpty) {
+          await refFile.writeAsBytes(bytes);
+          return refFile;
+        }
+      }
+    } catch (_) {}
+
+    return null;
   }
 
   /// Returns the source root plus all subdirectories (for image resolution).

@@ -3,6 +3,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'services/pandoc_downloader.dart';
 import 'services/pandoc_resolver.dart';
+import 'services/pdf_image_preprocessor.dart';
+import 'services/pdf_tool_downloader.dart';
 import 'services/pipeline.dart';
 
 enum PandocStatus { checking, available, notFound, downloading, downloadFailed }
@@ -47,6 +49,8 @@ class ConverterState extends ChangeNotifier {
   Future<void> init() async {
     final appSupport = await getApplicationSupportDirectory();
     PandocResolver.configure(appSupport.path);
+    PdfToolDownloader.configure(appSupport.path);
+    PdfImagePreprocessor.configure(PdfToolDownloader.resolvedBinDir());
 
     _pandocStatus = PandocDownloader.isAvailable()
         ? PandocStatus.available

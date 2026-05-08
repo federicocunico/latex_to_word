@@ -32,6 +32,20 @@ class PdfImagePreparationResult {
   }
 }
 
+// ── Tool abstraction ──────────────────────────────────────────────────────────
+
+enum _ToolType { magick, pdftoppm, mutool, ghostscript }
+
+/// A discovered raster tool with its resolved executable path.
+class _RasterTool {
+  final _ToolType type;
+  final String exe; // full path OR bare command name if found on PATH
+
+  const _RasterTool(this.type, this.exe);
+}
+
+// ── Preprocessor ─────────────────────────────────────────────────────────────
+
 class PdfImagePreprocessor {
   static final RegExp _includeGraphicsPattern = RegExp(
     r'\\includegraphics(?:\s*\[[^\]]*\])?\s*\{([^}]+)\}',
@@ -39,6 +53,24 @@ class PdfImagePreprocessor {
   );
 
   static List<_RasterTool>? _cachedTools;
+
+  /// The `bin/` directory of a downloaded poppler installation (set via
+  /// [configure]). When set, the preprocessor will check here for `pdftoppm`
+  /// in addition to the system PATH and well-known installation paths.
+  static String? _downloadedBinDir;
+
+  /// Call once after [PdfToolDownloader.configure] to tell the preprocessor
+  /// where to look for a downloaded PDF tool.
+  static void configure(String? downloadedBinDir) {
+    _downloadedBinDir = downloadedBinDir;
+    _cachedTools = null; // invalidate cache so discovery re-runs
+  }
+
+  /// Returns `true` if at least one PDF-to-PNG tool is already cached.
+  static bool hasToolsAvailable() => _cachedTools?.isNotEmpty ?? false;
+
+  /// Clears the tool discovery cache, forcing re-discovery on the next run.
+  static void clearToolCache() => _cachedTools = null;
 
   /// Rewrites PDF image references in all .tex files under [mainTex.parent]
   /// to PNG paths after converting those PDFs to PNG.
@@ -110,9 +142,6 @@ class PdfImagePreprocessor {
       if (!_isCommentedOut(content, match.start)) {
         final rawRef = match.group(1)!;
 
-        // LaTeX resolves image paths from the project root (compile directory).
-        // Fall back to the tex file's own directory for paths that use relative
-        // navigation (e.g. ../images/fig.pdf written relative to the .tex file).
         File? sourcePdf;
         Directory resolveBase = projectRoot;
 
@@ -156,8 +185,9 @@ class PdfImagePreprocessor {
             }
           } else {
             warnings.add(
-              'Could not convert ${sourcePdf.path} to PNG. '
-              'Install ImageMagick (magick), poppler (pdftoppm), or mutool.',
+              'Could not convert ${sourcePdf.path} to PNG — '
+              'no PDF rasterizer found or all rasterizers failed. '
+              'Install ghostscript, ImageMagick, MuPDF, or poppler for PDF image support.',
             );
           }
         }
@@ -181,16 +211,14 @@ class PdfImagePreprocessor {
   }
 
   static bool _isCommentedOut(String content, int commandStart) {
-    if (commandStart <= 0) {
-      return false;
-    }
+    if (commandStart <= 0) return false;
 
     var lineStart = content.lastIndexOf('\n', commandStart - 1);
     lineStart = lineStart == -1 ? 0 : lineStart + 1;
     final prefix = content.substring(lineStart, commandStart);
 
-    for (var i = 0; i < prefix.length; i += 1) {
-      if (prefix[i] == '%' && (i == 0 || prefix[i - 1] != r'\\')) {
+    for (var i = 0; i < prefix.length; i++) {
+      if (prefix[i] == '%' && (i == 0 || prefix[i - 1] != r'\')) {
         return true;
       }
     }
@@ -199,9 +227,7 @@ class PdfImagePreprocessor {
 
   static File? _resolvePdfReference(Directory texDir, String ref) {
     var candidate = ref.trim();
-    if (candidate.isEmpty) {
-      return null;
-    }
+    if (candidate.isEmpty) return null;
 
     if ((candidate.startsWith('"') && candidate.endsWith('"')) ||
         (candidate.startsWith("'") && candidate.endsWith("'"))) {
@@ -217,18 +243,12 @@ class PdfImagePreprocessor {
     final hasLikelyMacro =
         candidate.contains(r'\') &&
         !RegExp(r'^[A-Za-z]:\\').hasMatch(candidate);
-    if (hasLikelyMacro) {
-      return null;
-    }
+    if (hasLikelyMacro) return null;
 
     final ext = p.extension(candidate).toLowerCase();
-    if (ext.isNotEmpty && ext != '.pdf') {
-      return null;
-    }
+    if (ext.isNotEmpty && ext != '.pdf') return null;
 
-    if (ext.isEmpty) {
-      candidate = '$candidate.pdf';
-    }
+    if (ext.isEmpty) candidate = '$candidate.pdf';
 
     final resolvedPath = p.isAbsolute(candidate)
         ? candidate
@@ -236,51 +256,160 @@ class PdfImagePreprocessor {
     return File(resolvedPath);
   }
 
+  // ── Tool discovery ──────────────────────────────────────────────────────────
+
   static Future<bool> _convertPdfToPngWithAvailableTool(
     File inputPdf,
     File outputPng,
   ) async {
     final tools = await _discoverRasterTools();
     for (final tool in tools) {
-      final converted = await _runConversion(tool, inputPdf, outputPng);
-      if (converted) {
-        return true;
-      }
+      if (await _runConversion(tool, inputPdf, outputPng)) return true;
     }
     return false;
   }
 
   static Future<List<_RasterTool>> _discoverRasterTools() async {
-    if (_cachedTools != null) {
-      return _cachedTools!;
-    }
+    if (_cachedTools != null) return _cachedTools!;
 
     final tools = <_RasterTool>[];
-    if (await _isCommandAvailable('magick', const ['-version'])) {
-      tools.add(_RasterTool.magick);
+
+    // 1. PATH — try each well-known command
+    if (await _isExeAvailable('magick', ['-version'])) {
+      tools.add(_RasterTool(_ToolType.magick, 'magick'));
     }
-    if (await _isCommandAvailable('pdftoppm', const ['-v'])) {
-      tools.add(_RasterTool.pdftoppm);
+    if (await _isExeAvailable('pdftoppm', ['-v'])) {
+      tools.add(_RasterTool(_ToolType.pdftoppm, 'pdftoppm'));
     }
-    if (await _isCommandAvailable('mutool', const ['--version'])) {
-      tools.add(_RasterTool.mutool);
+    if (await _isExeAvailable('mutool', ['--version'])) {
+      tools.add(_RasterTool(_ToolType.mutool, 'mutool'));
+    }
+    for (final gs in ['gswin64c', 'gswin32c', 'gs']) {
+      if (await _isExeAvailable(gs, ['--version'])) {
+        tools.add(_RasterTool(_ToolType.ghostscript, gs));
+        break;
+      }
+    }
+
+    // 2. Extended search in well-known installation directories
+    if (tools.isEmpty) {
+      final extended = await _searchKnownLocations();
+      tools.addAll(extended);
+    }
+
+    // 3. Previously downloaded poppler (app-support dir) — always add as
+    // fallback even if PATH tools exist, because some PATH tools (e.g. magick
+    // without ghostscript) silently fail on PDFs.
+    if (_downloadedBinDir != null) {
+      final exe = p.join(
+        _downloadedBinDir!,
+        Platform.isWindows ? 'pdftoppm.exe' : 'pdftoppm',
+      );
+      if (File(exe).existsSync()) {
+        final alreadyHasFullPathPdftoppm = tools.any(
+          (t) => t.type == _ToolType.pdftoppm && p.isAbsolute(t.exe),
+        );
+        if (!alreadyHasFullPathPdftoppm) {
+          tools.add(_RasterTool(_ToolType.pdftoppm, exe));
+        }
+      }
     }
 
     _cachedTools = tools;
     return tools;
   }
 
-  static Future<bool> _isCommandAvailable(
+  /// Searches well-known installation paths on Windows (Ghostscript,
+  /// MiKTeX, TeX Live, poppler-windows).
+  static Future<List<_RasterTool>> _searchKnownLocations() async {
+    if (!Platform.isWindows) return [];
+
+    final found = <_RasterTool>[];
+
+    // Ghostscript
+    final gs = await _findGhostscriptExe();
+    if (gs != null) found.add(_RasterTool(_ToolType.ghostscript, gs));
+    if (found.isNotEmpty) return found;
+
+    // pdftoppm from MiKTeX
+    final miktex = await _findMiKTeXPdftoppm();
+    if (miktex != null) found.add(_RasterTool(_ToolType.pdftoppm, miktex));
+    if (found.isNotEmpty) return found;
+
+    // pdftoppm from TeX Live
+    final texlive = await _findTexLivePdftoppm();
+    if (texlive != null) found.add(_RasterTool(_ToolType.pdftoppm, texlive));
+
+    return found;
+  }
+
+  static Future<String?> _findGhostscriptExe() async {
+    for (final root in [
+      r'C:\Program Files\gs',
+      r'C:\Program Files (x86)\gs',
+    ]) {
+      final rootDir = Directory(root);
+      if (!rootDir.existsSync()) continue;
+      try {
+        await for (final sub in rootDir.list()) {
+          if (sub is! Directory) continue;
+          for (final name in ['gswin64c.exe', 'gswin32c.exe']) {
+            final exe = File(p.join(sub.path, 'bin', name));
+            if (exe.existsSync()) return exe.path;
+          }
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  static Future<String?> _findMiKTeXPdftoppm() async {
+    final localAppData = Platform.environment['LOCALAPPDATA'] ?? '';
+    final programFiles =
+        Platform.environment['ProgramFiles'] ?? r'C:\Program Files';
+
+    final candidates = [
+      p.join(localAppData, 'Programs', 'MiKTeX', 'miktex', 'bin', 'x64', 'pdftoppm.exe'),
+      p.join(localAppData, 'Programs', 'MiKTeX', 'miktex', 'bin', 'pdftoppm.exe'),
+      p.join(programFiles, 'MiKTeX', 'miktex', 'bin', 'x64', 'pdftoppm.exe'),
+      p.join(programFiles, 'MiKTeX', 'miktex', 'bin', 'pdftoppm.exe'),
+    ];
+    for (final path in candidates) {
+      if (File(path).existsSync()) return path;
+    }
+    return null;
+  }
+
+  static Future<String?> _findTexLivePdftoppm() async {
+    final rootDir = Directory(r'C:\texlive');
+    if (!rootDir.existsSync()) return null;
+    try {
+      final years = <String>[];
+      await for (final e in rootDir.list()) {
+        if (e is Directory) years.add(e.path);
+      }
+      years.sort();
+      for (final yearDir in years.reversed) {
+        final exe = File(p.join(yearDir, 'bin', 'windows', 'pdftoppm.exe'));
+        if (exe.existsSync()) return exe.path;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static Future<bool> _isExeAvailable(
     String command,
     List<String> args,
   ) async {
     try {
       final result = await Process.run(command, args, runInShell: false);
-      return result.exitCode == 0;
+      return result.exitCode == 0 || result.exitCode == 1;
     } on ProcessException {
       return false;
     }
   }
+
+  // ── Conversion ──────────────────────────────────────────────────────────────
 
   static Future<bool> _runConversion(
     _RasterTool tool,
@@ -291,47 +420,42 @@ class PdfImagePreprocessor {
       await outputPng.parent.create(recursive: true);
 
       ProcessResult result;
-      switch (tool) {
-        case _RasterTool.magick:
-          result = await Process.run('magick', <String>[
-            '-density',
-            '300',
+      switch (tool.type) {
+        case _ToolType.magick:
+          result = await Process.run(tool.exe, <String>[
+            '-density', '300',
             '${inputPdf.path}[0]',
-            '-background',
-            'white',
-            '-alpha',
-            'remove',
-            '-alpha',
-            'off',
+            '-background', 'white',
+            '-alpha', 'remove',
+            '-alpha', 'off',
             outputPng.path,
           ], runInShell: false);
-          break;
-        case _RasterTool.pdftoppm:
+
+        case _ToolType.pdftoppm:
           final outputBase = p.withoutExtension(outputPng.path);
-          result = await Process.run('pdftoppm', <String>[
-            '-f',
-            '1',
-            '-l',
-            '1',
-            '-singlefile',
-            '-png',
+          result = await Process.run(tool.exe, <String>[
+            '-f', '1', '-l', '1',
+            '-singlefile', '-png',
             inputPdf.path,
             outputBase,
           ], runInShell: false);
-          break;
-        case _RasterTool.mutool:
-          result = await Process.run('mutool', <String>[
-            'draw',
-            '-F',
-            'png',
-            '-r',
-            '300',
-            '-o',
-            outputPng.path,
-            inputPdf.path,
-            '1',
+
+        case _ToolType.mutool:
+          result = await Process.run(tool.exe, <String>[
+            'draw', '-F', 'png', '-r', '300',
+            '-o', outputPng.path,
+            inputPdf.path, '1',
           ], runInShell: false);
-          break;
+
+        case _ToolType.ghostscript:
+          result = await Process.run(tool.exe, <String>[
+            '-dNOPAUSE', '-dBATCH', '-dQUIET',
+            '-sDEVICE=pngalpha',
+            '-r300',
+            '-dFirstPage=1', '-dLastPage=1',
+            '-sOutputFile=${outputPng.path}',
+            inputPdf.path,
+          ], runInShell: false);
       }
 
       return result.exitCode == 0 && await outputPng.exists();
@@ -352,5 +476,3 @@ class _RewriteOutcome {
     required this.warnings,
   });
 }
-
-enum _RasterTool { magick, pdftoppm, mutool }
